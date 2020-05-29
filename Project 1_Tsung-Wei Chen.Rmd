@@ -1,6 +1,6 @@
 ---
 title: "Project 1"
-author: "Tsung-Wei Chen"
+author: "Tsung-Wei (Peter) Chen"
 date: "3/27/2020"
 output: word_document
 ---
