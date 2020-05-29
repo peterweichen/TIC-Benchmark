@@ -1,4 +1,4 @@
-# TIC-Benchmark
+# Actuarial Analytics of Caravan Insurance Policy in R
 TIC Benchmark Project in R
 
 author: "Tsung-Wei (Peter) Chen"  
