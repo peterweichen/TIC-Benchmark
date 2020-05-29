@@ -1,11 +1,8 @@
 # TIC-Benchmark
 TIC Benchmark Project in R
 
----
-title: "Project 1"  
 author: "Tsung-Wei (Peter) Chen"  
 date: "3/27/2020"  
-
 
 
 ## Introduction
