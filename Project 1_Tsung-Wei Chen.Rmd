@@ -1,0 +1,473 @@
+---
+title: "Project 1"
+author: "Tsung-Wei Chen"
+date: "3/27/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(gridExtra)
+library(caret) # Various models package
+library(xgboost)
+library(DMwR) # SMOTE
+library(pROC) # ROC AUC Plotting
+library(ROCR)
+library(readr)
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(ggthemr)
+library(rcompanion)
+library(glmnet)
+library(doParallel)
+library(foreach)
+```
+
+## Introduction
+
+### Aims
+
+The goal of project is to explore dataset provided by [The Insurance Company (TIC) Benchmark](http://liacs.leidenuniv.nl/~puttenpwhvander/library/cc2000/), which contains insureds' information. The data consists of 86 variables and includes product usage data and socio-demographic data derived from zip area codes. I need to predict the potential customers whether they are potentially interested in a caravan insurance policy or not.
+
+**QUESTION:** Can you predict who would be interested in buying a caravan insurance policy and give an explanation why?  
+
+
+### Data
+
+There are three datasets in [KDD archive at Irvine](http://kdd.ics.uci.edu/databases/tic/tic.html).
+
++ [TICDATA2000.txt](http://kdd.ics.uci.edu/databases/tic/ticdata2000.txt): Dataset to train and validate prediction models and build a description (5822 customer records). Each record consists of 86 attributes, containing sociodemographic data (attribute 1-43) and product ownership (attributes 44- 86).The sociodemographic data is derived from zip codes. All customers living in areas with the same zip code have the same sociodemographic attributes. Attribute 86, ”CARA- VAN:Number of mobile home policies”, is the target variable.
+
++ [TICEVAL2000.txt](http://kdd.ics.uci.edu/databases/tic/ticeval2000.txt): Dataset for predictions (4000 customer records). It has the same format as TICDATA2000.txt, only the target is missing. Participants are supposed to return the list of predicted targets only. All datasets are in tab delimited format.
+
++ [TICTGTS2000.txt](http://kdd.ics.uci.edu/databases/tic/tictgts2000.txt): Targets for the evaluation set.
+
+
+```{r message=FALSE, warning=FALSE}
+ticdata2000 <- read_table2("http://kdd.ics.uci.edu/databases/tic/ticdata2000.txt", col_names = F)
+ticeval2000 <- read_table2("http://kdd.ics.uci.edu/databases/tic/ticeval2000.txt", col_names = F)
+tictgts2000 <- read_table2("http://kdd.ics.uci.edu/databases/tic/tictgts2000.txt", col_names = F)
+colnames <- c("MOSTYPE", "MAANTHUI", "MGEMOMV", "MGEMLEEF", "MOSHOOFD", "MGODRK", "MGODPR", "MGODOV", "MGODGE", "MRELGE", "MRELSA", "MRELOV", "MFALLEEN", "MFGEKIND", "MFWEKIND", "MOPLHOOG", "MOPLMIDD", "MOPLLAAG", "MBERHOOG", "MBERZELF", "MBERBOER", "MBERMIDD", "MBERARBG", "MBERARBO", "MSKA", "MSKB1", "MSKB2", "MSKC", "MSKD", "MHHUUR", "MHKOOP", "MAUT1", "MAUT2", "MAUT0", "MZFONDS", "MZPART", "MINKM30", "MINK3045", "MINK4575", "MINK7512", "MINK123M", "MINKGEM", "MKOOPKLA", "PWAPART", "PWABEDR", "PWALAND", "PPERSAUT", "PBESAUT", "PMOTSCO", "PVRAAUT", "PAANHANG", "PTRACTOR", "PWERKT", "PBROM", "PLEVEN", "PPERSONG", "PGEZONG", "PWAOREG", "PBRAND", "PZEILPL", "PPLEZIER", "PFIETS", "PINBOED", "PBYSTAND", "AWAPART", "AWABEDR", "AWALAND", "APERSAUT", "ABESAUT", "AMOTSCO", "AVRAAUT", "AAANHANG", "ATRACTOR", "AWERKT", "ABROM", "ALEVEN", "APERSONG", "AGEZONG", "AWAOREG", "ABRAND", "AZEILPL", "APLEZIER", "AFIETS", "AINBOED", "ABYSTAND", "CARAVAN")
+colnames(ticdata2000) <- colnames
+colnames(ticeval2000) <- colnames[1:85]
+colnames(tictgts2000) <- colnames[86]
+```
+
+```{r message=FALSE, warning=FALSE}
+# Check NA
+ticdata2000 <- ticdata2000[complete.cases(ticdata2000),]
+ticeval2000 <- ticeval2000[complete.cases(ticeval2000),]
+```
+
+Check the numbers and proportions of target variables, `CARAVAN`. This is an imblanaced data that around 6% of insureds have bought CARAVAN insurance policy.
+
+```{r message=FALSE, warning=FALSE}
+setDT(ticdata2000)[, .N, .(CARAVAN)][, Prop := round(N/sum(N),4)][]
+```
+
+
+
+## Modeling
+
+### Logistic Regression
+
+First, find correlations to exclude from the model. This function searches through a correlation matrix and returns a vector of integers corresponding to columns to remove to reduce pair-wise correlations.
+
+```{r message=FALSE, warning=FALSE}
+highcor <- findCorrelation(cor(ticdata2000), cutoff = .75, names = F)
+ticdata2000_logit <- subset(ticdata2000, select = c(-highcor))
+```
+
+Second, model with `glm()` function.
+
+```{r message=FALSE, warning=FALSE}
+model_glm <- glm(CARAVAN ~ . , data = ticdata2000_logit, family = binomial(logit) )
+summary_glm <- summary(model_glm)
+summary_glm
+print(paste0("The pseudo R square is: ", round( 1 - ( summary_glm$deviance / summary_glm$null.deviance ), 2 )))
+```
+
+Third, a fast check on all the p-values of the variables and remove insignificant one, which are greater than `0.05` and model again.
+
+```{r message=FALSE, warning=FALSE}
+ticdata2000_logit <- ticdata2000_logit[,c("MGEMLEEF", "PWAPART", "PWAOREG", "PPLEZIER", "APERSAUT", "AFIETS", "CARAVAN")]
+model_glm_2 <- glm(CARAVAN ~ . , data = ticdata2000_logit, family = binomial(logit) )
+summary_glm_2 <- summary(model_glm_2)
+summary_glm_2
+print(paste0("The pseudo R square is: ", round( 1 - ( summary_glm_2$deviance / summary_glm_2$null.deviance ), 2 )))
+```
+
+```{r message=FALSE, warning=FALSE}
+ticdata2000_logit_final <- ticdata2000_logit[,c("PWAPART", "PWAOREG", "PPLEZIER", "APERSAUT", "AFIETS", "CARAVAN")]
+model_glm_3 <- glm(CARAVAN ~ . , data = ticdata2000_logit_final, family = binomial(logit) )
+summary_glm_3 <- summary(model_glm_3)
+summary_glm_3
+print(paste0("The pseudo R square is: ", round( 1 - ( summary_glm_3$deviance / summary_glm_3$null.deviance ), 3 )))
+```
+
+The `nagelkerke()` function of `rcompanion` package provides three types of Pseudo R-squared value (McFadden, Cox and Snell, and Cragg and Uhler) and Likelihood ratio test results. The McFadden Pseudo R-squared value is the commonly reported metric for binary logistic regression model fit. 
+
+```{r message=FALSE, warning=FALSE}
+nagelkerke(model_glm_3)
+```
+
+Predicting whether customers are interested in insurance policy on both training and predicting set, and I’ll perform an evaluation on the training set by plotting the probability (score). For a ideal double density plot, I want the distribution of scores to be separated, with the score of the "No" to be on the left and the score of the "Yes" to be on the right. However, both are skewed to the left.
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+ticeval2000_logit_final <- ticeval2000[,c("PWAPART", "PWAOREG", "PPLEZIER", "APERSAUT", "AFIETS")]
+# prediction
+ticdata2000_logit_final$prediction <- predict( model_glm_3, newdata = ticdata2000_logit_final, type = "response" )
+ticeval2000_logit_final$prediction <- predict( model_glm_3, newdata = ticeval2000_logit_final, type = "response" )
+
+# distribution of the prediction score grouped by known outcome
+ggplot( ticdata2000_logit_final, aes( prediction, color = as.factor(CARAVAN) ) ) + 
+  geom_density( size = 1 ) +
+  ggtitle( "Training's Predicted Score" ) + 
+  scale_colour_economist( name = "CARAVAN", labels = c( "No", "Yes" ) ) + 
+  theme_economist()
+```
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+ggplot( ticeval2000_logit_final, aes( prediction, color = as.factor(tictgts2000$CARAVAN) ) ) + 
+  geom_density( size = 1 ) +
+  ggtitle( "Training's Predicted Score" ) + 
+  scale_colour_economist( name = "CARAVAN", labels = c( "No", "Yes" ) ) + 
+  theme_economist()
+```
+
+Accuracy is not the suitable indicator for the model on imbalanced dataset.
+
+```{r message=FALSE, warning=FALSE}
+logit_test <- predict(model_glm_3, type = "response", newdata = ticdata2000_logit_final)
+logit_roc_test <- roc(ticdata2000_logit_final$CARAVAN, logit_test, percent = T, positive = '1')
+auc(logit_roc_test)
+logit_bestthreshold <- coords(logit_roc_test, "best", "threshold", transpose = T)
+logit_bestthreshold
+```
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+plot(performance(ROCR::prediction(predictions = logit_test, labels = ticdata2000_logit_final$CARAVAN), "tpr" , "fpr"),
+     colorize = TRUE,
+     print.cutoffs.at= seq(0,1,0.01),
+     text.adj=c(-0.2,1.7))
+```
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+matplot(data.frame(logit_roc_test$sensitivities, logit_roc_test$specificities), x = logit_roc_test$thresholds, type='l', xlab = 'threshold', ylab='TPR, TNR')
+legend('bottomright', legend=c('TPR', 'TNR'), lty=1:2, col=1:2)
+```
+
+I use 5%/6%/bestthreshold cutoff on training/tesing dataset to determine the final threshhold.
+
+```{r message=FALSE, warning=FALSE}
+logit_cm_0.05_test <- confusionMatrix(data = factor(as.numeric(logit_test > 0.05)), reference = factor(ticdata2000_logit_final$CARAVAN), positive = "1")
+logit_cm_0.06_test <- confusionMatrix(data = factor(as.numeric(logit_test > 0.06)), reference = factor(ticdata2000_logit_final$CARAVAN), positive = "1")
+logit_cm_bestthreshold_test <- confusionMatrix(data = factor(as.numeric(logit_test > logit_bestthreshold["threshold"])), reference = factor(ticdata2000_logit_final$CARAVAN), positive = "1")
+logit_cm_0.05_test$table
+logit_cm_0.06_test$table
+logit_cm_bestthreshold_test$table
+```
+
+Next, predict on predicting dataset and compare with evaluating dataset.
+
+```{r message=FALSE, warning=FALSE}
+logit_eval <- predict(model_glm_3, type = "response", newdata = ticeval2000_logit_final)
+logit_roc_eval<- roc(tictgts2000$CARAVAN, logit_eval, percent = F, positive = '1')
+auc(logit_roc_eval)
+```
+
+```{r message=FALSE, warning=FALSE}
+logit_cm_0.05_eval <- confusionMatrix(data = factor(as.numeric(logit_eval > 0.05)), reference = factor(tictgts2000$CARAVAN), positive = "1")
+logit_roc_0.05_eval <- roc(tictgts2000$CARAVAN, (as.numeric(logit_eval > 0.05)), positive = 1)
+logit_cm_0.06_eval <- confusionMatrix(data = factor(as.numeric(logit_eval > 0.06)), reference = factor(tictgts2000$CARAVAN), positive = "1")
+logit_roc_0.06_eval <- roc(tictgts2000$CARAVAN, (as.numeric(logit_eval > 0.06)), positive = 1)
+logit_cm_bestthreshold_eval <- confusionMatrix(data = factor(as.numeric(logit_eval > logit_bestthreshold["threshold"])), reference = factor(tictgts2000$CARAVAN), positive = "1")
+logit_roc_bestthreshold_eval <- roc(tictgts2000$CARAVAN, (as.numeric(logit_eval > logit_bestthreshold["threshold"])), positive = 1)
+logit_cm_0.05_eval$table
+auc(logit_roc_0.05_eval)
+logit_cm_0.06_eval$table
+auc(logit_roc_0.06_eval)
+logit_cm_bestthreshold_eval$table
+auc(logit_roc_bestthreshold_eval)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+ConfusionMatrixInfo <- function( data, eval, predict, actual, cutoff )
+{	
+  # extract the column ;
+  # relevel making 1 appears on the more commonly seen position in 
+  # a two by two confusion matrix	
+  predict <- data[[predict]]
+  actual <- relevel( as.factor( eval[[actual]] ), "1" )
+  
+  result <- data.table( actual = actual, predict = predict )
+  
+  # caculating each pred falls into which category for the confusion matrix
+  result[ , type := ifelse( predict >= cutoff & actual == 1, "TP",
+                            ifelse( predict >= cutoff & actual == 0, "FP", 
+                                    ifelse( predict < cutoff & actual == 1, "FN", "TN" ) ) ) %>% as.factor() ]
+  
+  # jittering : can spread the points along the x axis 
+  plot <- ggplot( result, aes( actual, predict, color = type ) ) + 
+    geom_violin( fill = "white", color = NA ) +
+    geom_jitter( shape = 1 ) + 
+    geom_hline( yintercept = cutoff, color = "blue", alpha = 0.6 ) + 
+    scale_y_continuous( limits = c( 0, 1 ) ) + 
+    scale_color_discrete( breaks = c( "TP", "FN", "FP", "TN" ) ) + # ordering of the legend 
+    guides( col = guide_legend( nrow = 2 ) ) + # adjust the legend to have two rows  
+    ggtitle( sprintf( "Confusion Matrix with Cutoff at %.2f", cutoff ) )
+  
+  return( list( data = result, plot = plot ) )
+}
+```
+
+The plot below depicts the tradeoff when choosing a cutoff. If increasing the cutoff value, the number of true negative (TN) increases and the number of true positive (TP) decreases. If increasing the cutoff value, the number of false positive (FP) is lowered, while the number of false negative (FN) rises. 
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+logit_cm_info <- ConfusionMatrixInfo(data = ticeval2000_logit_final, eval = tictgts2000, predict = "prediction", actual = "CARAVAN", cutoff = 0.05)
+ggthemr("flat")
+logit_cm_info$plot
+```
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+logit_cm_info <- ConfusionMatrixInfo(data = ticeval2000_logit_final, eval = tictgts2000, predict = "prediction", actual = "CARAVAN", cutoff = 0.06)
+ggthemr("flat")
+logit_cm_info$plot
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+df <- data.table(threshold = c(0.05, 0.06, logit_bestthreshold["threshold"]), precision = c(logit_cm_0.05_eval$byClass["Precision"], logit_cm_0.06_eval$byClass["Precision"], logit_cm_bestthreshold_eval$byClass["Precision"]), recall = c(logit_cm_0.05_eval$byClass["Recall"], logit_cm_0.06_eval$byClass["Recall"], logit_cm_bestthreshold_eval$byClass["Recall"]), auc = c(auc(logit_roc_0.05_eval), auc(logit_roc_0.06_eval), auc(logit_roc_bestthreshold_eval)), PredictedPurchasing = c(logit_cm_0.05_eval$table[4], logit_cm_0.06_eval$table[4], logit_cm_bestthreshold_eval$table[4]))
+df[, `:=`(recall = round(recall,3), precision = round(precision,3), auc = round(auc,3))]
+knitr::kable(df)
+```
+
+
+Therefore, logistic model can correctly predict `174` customers in original `238` who are willing to buy the insurance policy with threshhold equals to `5%`. The precision is around `8.5%`, `174/(174+64)` and the recall is around `73.1%`.
+
+To reduce FP, change threshold to 6%. The logistic model correctly predict `119` customers who are interested in CARAVAN policy with higher precision, `11.3%`, but lower recall, `50%`.
+
+If the insurer wants more targeted clients those who are willing to buy CARAVAN without considering the costs, use threshold with `5%`. With the prediction, insurer can target `174` customers and increase the profitability. However, if insurer needs to consider costs, threshhold with `6%` may be better to consider. 
+
+
+
+### Penalized Logistic Regression
+
+Penalized logistic regression imposes a penalty to the logistic model for having too many variables. This results in shrinking the coefficients of the less contributive variables toward zero, which is also known as regularization.
+
+#### Lasso: alpha = 1
+
+Least Absolute Shrinkage and Selection Operator (LASSO) creates a regression model that is penalized with the L1-norm which is the sum of the absolute coefficients. The coefficients of some less contributive variables are forced to be exactly zero. Only the most significant variables are kept in the final model.
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+set.seed(9080)
+cv.lasso <- cv.glmnet(model.matrix(CARAVAN~., ticdata2000)[,-1], ticdata2000$CARAVAN, alpha = 1, family = "binomial", nfolds = 20, type.measure = 'auc')
+plot(cv.lasso)
+```
+
+The plot above displays the cross-validation area under curve based on the log of lambda. The left dashed vertical line indicates that the log of the optimal value of lambda is approximately `-6`, which is the one that maximizes the prediction auc. This lambda value will give the most accurate model.
+
+```{r message=FALSE, warning=FALSE}
+cv.lasso$lambda.min
+```
+
+Compute the final lasso model on training/testing dataset using lambda.min and use median/mean/bestthreshold to determine the threshold.
+
+```{r message=FALSE, warning=FALSE}
+# Final model with lambda.min
+lasso.model_min <- glmnet(model.matrix(CARAVAN~., ticdata2000)[,-1], ticdata2000$CARAVAN, alpha = 1, family = "binomial", lambda = cv.lasso$lambda.min)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Make prediction on test data
+lasso_test <- predict(lasso.model_min, newx = as.matrix(ticdata2000[,1:85]))
+lasso_roc_test <- roc(ticdata2000$CARAVAN, lasso_test, percent = T, positive = '1')
+auc(lasso_roc_test)
+lasso_bestthreshold <- coords(lasso_roc_test, "best", "threshold", transpose = T)
+lasso_bestthreshold
+confusionMatrix(data = factor(as.numeric(lasso_test > median(lasso_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(lasso_test > mean(lasso_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(lasso_test > lasso_bestthreshold["threshold"])), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+```
+
+As the result above, I choose to use average predicting probabilites of training/testing as threshold instead of `0.5` on imbalanced dataset.
+
+Next, evaluting result displays below. 
+
+```{r message=FALSE, warning=FALSE}
+lasso_eval <- predict(lasso.model_min, newx = as.matrix(ticeval2000))
+lasso_cm_eval_mean <- confusionMatrix(data = factor(as.numeric(lasso_eval > mean(lasso_test))), reference = factor(tictgts2000$CARAVAN), positive = "1")
+lasso_roc_mean_eval <- roc(tictgts2000$CARAVAN, (as.numeric(lasso_eval > mean(lasso_test))), positive = 1)
+lasso_cm_eval_bestthreshold <- confusionMatrix(data = factor(as.numeric(lasso_eval > lasso_bestthreshold["threshold"])), reference = factor(tictgts2000$CARAVAN), positive = "1")
+lasso_roc_bestthreshold_eval <- roc(tictgts2000$CARAVAN, (as.numeric(lasso_eval > lasso_bestthreshold["threshold"])), positive = 1)
+lasso_cm_eval_mean$table
+auc(lasso_roc_mean_eval)
+lasso_cm_eval_bestthreshold$table
+auc(lasso_roc_bestthreshold_eval)
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+df_lasso <- data.table(threshold = c(round(mean(lasso_test),3), round(lasso_bestthreshold["threshold"],3)), precision = c(lasso_cm_eval_mean$byClass["Precision"], lasso_cm_eval_bestthreshold$byClass["Precision"]), recall = c(lasso_cm_eval_mean$byClass["Recall"], lasso_cm_eval_bestthreshold$byClass["Recall"]), auc = c(auc(lasso_roc_mean_eval), auc(lasso_roc_bestthreshold_eval)), PredictedPurchasing = c(lasso_cm_eval_mean$table[4], lasso_cm_eval_bestthreshold$table[4]))
+df_lasso[, `:=`(recall = round(recall,3), precision = round(precision,3), auc = round(auc,3))]
+knitr::kable(df_lasso)
+```
+
+Although the precision of lasso is not significantly better than logistic, the recall of lasso model is higher than logistic one. Moreover, the Lasso model correctly predict `188` in `238` customers. If insurer wants more targeted clients those who are willing to buy CARAVAN without considering the costs, lasso model is a good choice than logistic model on this imbalanced data.
+
+
+#### Ridge: alpha = 0
+
+Ridge Regression creates a linear regression model that is penalized with the L2-norm which is the sum of the squared coefficients. Variables with minor contribution have their coefficients close to zero. However, all the variables are incorporated in the model. This is useful when all variables need to be incorporated in the model according to domain knowledge.
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center'}
+set.seed(9080)
+cv.ridge <- cv.glmnet(model.matrix(CARAVAN~., ticdata2000)[,-1], ticdata2000$CARAVAN, alpha = 0, family = "binomial", nfolds = 20, type.measure = 'auc')
+plot(cv.ridge)
+```
+
+The plot above displays the cross-validation area under curve based on the log of lambda. The left dashed vertical line indicates that the log of the optimal value of lambda is approximately `-4`, which is the one that maximizes the prediction auc. This lambda value will give the most accurate model.
+
+```{r message=FALSE, warning=FALSE}
+cv.ridge$lambda.min
+```
+
+Compute the final ridge model on training/testing dataset using lambda.min and use median/mean to determine the threshold.
+
+```{r message=FALSE, warning=FALSE}
+# Final model with lambda.min
+ridge.model_min <- glmnet(model.matrix(CARAVAN~., ticdata2000)[,-1], ticdata2000$CARAVAN, alpha = 0, family = "binomial", lambda = cv.ridge$lambda.min)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Make prediction on test data
+ridge_test <- predict(ridge.model_min, newx = as.matrix(ticdata2000[,1:85]))
+ridge_roc_test <- roc(ticdata2000$CARAVAN, ridge_test, percent = T, positive = '1')
+auc(ridge_roc_test)
+ridge_bestthreshold <- coords(ridge_roc_test, "best", "threshold", transpose = T)
+ridge_bestthreshold
+confusionMatrix(data = factor(as.numeric(ridge_test > median(ridge_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(ridge_test > median(ridge_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$byClass["F1"]
+confusionMatrix(data = factor(as.numeric(ridge_test > mean(ridge_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(ridge_test > mean(ridge_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$byClass["F1"]
+confusionMatrix(data = factor(as.numeric(ridge_test > ridge_bestthreshold)), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(ridge_test > ridge_bestthreshold)), reference = factor(ticdata2000$CARAVAN), positive = "1")$byClass["F1"]
+```
+
+As the result above, I choose to use average predicting probabilites of training/testing as threshold instead of `0.5` on imbalanced dataset because of the higher F1 score. Although using best threshold will get higher F1 score, the TP is too low.
+
+Next, evaluting result displays below. 
+
+```{r message=FALSE, warning=FALSE}
+ridge_eval <- predict(ridge.model_min, newx = as.matrix(ticeval2000))
+ridge_cm_eval_mean <- confusionMatrix(data = factor(as.numeric(ridge_eval > mean(ridge_test))), reference = factor(tictgts2000$CARAVAN), positive = "1")
+ridge_cm_eval_mean$table
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+df_ridge <- data.table(threshold = c(round(mean(ridge_test),3)), precision = c(ridge_cm_eval_mean$byClass["Precision"]), recall = c(ridge_cm_eval_mean$byClass["Recall"]), auc = c(roc(factor(tictgts2000$CARAVAN), as.numeric(ridge_eval))$auc), PredictedPurchasing = c(ridge_cm_eval_mean$table[4]))
+df_ridge[, `:=`(recall = round(recall,3), precision = round(precision,3), auc = round(auc,3))]
+knitr::kable(df_ridge)
+```
+
+The precision and the recall of Ridge model is higher than Lasso one. Moreover, the ridge model correctly predict `191` in `238` customers. If insurer wants more targeted clients those who are willing to buy CARAVAN without considering the costs, ridge model is a good choice than lasso and logistic model.
+
+
+#### Elastic Net: 0 < alpha < 1
+
+Elastic Net produces a regression model that is penalized with both the L1-norm and L2-norm. The consequence of this is to effectively shrink coefficients (like in ridge regression) and to set some coefficients to zero (as in LASSO).
+
+```{r message=FALSE, warning=FALSE, cache = TRUE}
+# ELASTIC NET WITH 0 < ALPHA < 1
+set.seed(9080)
+registerDoParallel(cores = 4)
+search <- foreach(i = seq(0.1, 0.9, 0.05), .combine = rbind) %dopar% {
+  cv <- cv.glmnet(model.matrix(CARAVAN~., ticdata2000)[,-1], ticdata2000$CARAVAN, family = "binomial", nfold = 10, type.measure = "auc", paralle = TRUE, alpha = i)
+  data.frame(cvm = cv$cvm[cv$lambda == cv$lambda.min], lambda.min = cv$lambda.min, alpha = i)
+}
+cv.elasticnet <- search[search$cvm == min(search$cvm), ]
+elasticnet.model_min <- glmnet(model.matrix(CARAVAN~., ticdata2000)[,-1], ticdata2000$CARAVAN, family = "binomial", lambda = cv.elasticnet$lambda.min, alpha = cv.elasticnet$alpha)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Make prediction on test data
+elasticnet_test <- predict(elasticnet.model_min, newx = as.matrix(ticdata2000[,1:85]))
+elasticnet_roc_test <- roc(ticdata2000$CARAVAN, elasticnet_test, percent = T, positive = '1')
+auc(elasticnet_roc_test)
+elasticnet_bestthreshold <- coords(elasticnet_roc_test, "best", "threshold", transpose = T)
+elasticnet_bestthreshold
+confusionMatrix(data = factor(as.numeric(elasticnet_test > median(elasticnet_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(elasticnet_test > median(elasticnet_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$byClass["F1"]
+confusionMatrix(data = factor(as.numeric(elasticnet_test > mean(elasticnet_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(elasticnet_test > mean(elasticnet_test))), reference = factor(ticdata2000$CARAVAN), positive = "1")$byClass["F1"]
+confusionMatrix(data = factor(as.numeric(elasticnet_test > elasticnet_bestthreshold)), reference = factor(ticdata2000$CARAVAN), positive = "1")$table
+confusionMatrix(data = factor(as.numeric(elasticnet_test > elasticnet_bestthreshold)), reference = factor(ticdata2000$CARAVAN), positive = "1")$byClass["F1"]
+```
+
+As the result above, I choose to use average predicting probabilites of training/testing as threshold instead of `0.5` on imbalanced dataset because of the higher F1 score.
+
+Next, evaluting result displays below. 
+
+```{r message=FALSE, warning=FALSE}
+elasticnet_eval <- predict(elasticnet.model_min, newx = as.matrix(ticeval2000))
+elasticnet_cm_eval_mean <- confusionMatrix(data = factor(as.numeric(elasticnet_eval > mean(elasticnet_test))), reference = factor(tictgts2000$CARAVAN), positive = "1")
+elasticnet_cm_eval_mean$table
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+df_elasticnet <- data.table(threshold = c(round(mean(elasticnet_test),3)), precision = c(elasticnet_cm_eval_mean$byClass["Precision"]), recall = c(elasticnet_cm_eval_mean$byClass["Recall"]), auc = c(roc(factor(tictgts2000$CARAVAN), as.numeric(elasticnet_eval))$auc), PredictedPurchasing = c(elasticnet_cm_eval_mean$table[4]))
+df_elasticnet[, `:=`(recall = round(recall,3), precision = round(precision,3), auc = round(auc,3))]
+knitr::kable(df_elasticnet)
+```
+
+
+
+## Conclusion
+
+**Summary for GLM model:** After comparison among logistic, lasso, ridge, and elastic net models, I will recommend insurance company to use *Ridge model* on these clients with marketing emails. Insurer can send the email to them with minor costs and successfully targets more than 190 CARAVAN prospects in 238's.
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+knitr::kable(rbindlist(sapply(list(Logistic = df, Lasso = df_lasso, Ridge = df_ridge, "Elastic Net" = df_elasticnet), rbind, simplify = F), idcol = "Model"))
+```
+
+**Final Confusion Matrix and Performance of Ridge Model:** successfully predicting `191` potential customers.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+ridge_cm_eval_mean$table
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+ridge_cm_eval_mean$byClass
+```
+
+Top 10 important features of Ridge model after standardization: 
+
+```{r message=FALSE, warning=FALSE, fig.show='hold', fig.align='center', echo=FALSE, cache=TRUE}
+ridge_coef <- as.data.table(as.matrix(coef(cv.ridge, s = "lambda.min"))[-1, 1] * apply(model.matrix(CARAVAN ~ ., ticdata2000)[, -1], 2, sd), keep.rownames = "Features")[order(V2, decreasing = T)]
+ggthemr_reset()
+ggplot2::ggplot(ridge_coef[1:10,], aes(x = reorder(V1, V2), y = V2)) + geom_col(aes(fill = V1)) + xlab("Features") + ylab("Ridge Features Importance") + coord_flip()
+```
+
+
+
+## Reference
+
+1. [Penalized Logistic Regression Essentials in R: Ridge, Lasso and Elastic Net](http://www.sthda.com/english/articles/36-classification-methods-essentials/149-penalized-logistic-regression-essentials-in-r-ridge-lasso-and-elastic-net/)
+
+2. [Penalized Regression in R by Jason Brownlee on July 25, 2014 in R Machine Learning](https://machinelearningmastery.com/penalized-regression-in-r/)
+
+3. [Variable Selection with Elastic Net](https://www.r-bloggers.com/variable-selection-with-elastic-net/)
+
+4. [Variable importance from GLMNET](https://stats.stackexchange.com/questions/14853/variable-importance-from-glmnet)
+
+
+
+
+
+
+
+
